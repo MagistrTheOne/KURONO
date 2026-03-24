@@ -57,6 +57,12 @@ class S1Config:
     filter_manifest: str
     use_weighted_sampling: bool
     score_weight_power: float
+    dit_depth: int
+    num_heads: int
+    num_experts: int
+    moe_aux_loss_coef: float
+    moe_capacity_factor: float
+    dropout: float
 
 
 def parse_args() -> S1Config:
@@ -100,6 +106,12 @@ def parse_args() -> S1Config:
         help="Sample clips proportional to manifest score^power (requires --filter-manifest)",
     )
     p.add_argument("--score-weight-power", type=float, default=1.0)
+    p.add_argument("--dit-depth", type=int, default=12)
+    p.add_argument("--num-heads", type=int, default=12)
+    p.add_argument("--num-experts", type=int, default=8)
+    p.add_argument("--moe-aux-loss-coef", type=float, default=0.01)
+    p.add_argument("--moe-capacity-factor", type=float, default=1.25)
+    p.add_argument("--dropout", type=float, default=0.0)
     a = p.parse_args()
     return S1Config(
         steps=a.steps,
@@ -132,6 +144,12 @@ def parse_args() -> S1Config:
         filter_manifest=a.filter_manifest,
         use_weighted_sampling=a.weighted_by_score,
         score_weight_power=a.score_weight_power,
+        dit_depth=a.dit_depth,
+        num_heads=a.num_heads,
+        num_experts=a.num_experts,
+        moe_aux_loss_coef=a.moe_aux_loss_coef,
+        moe_capacity_factor=a.moe_capacity_factor,
+        dropout=a.dropout,
     )
 
 
@@ -175,6 +193,9 @@ def _save_checkpoint(path: str, model: nn.Module, optimizer: AdamW, ema: EMA, st
         "ema": ema.state_dict(),
         "config": {
             "hidden_size": cfg.hidden_size,
+            "dit_depth": cfg.dit_depth,
+            "num_heads": cfg.num_heads,
+            "num_experts": cfg.num_experts,
             "num_train_timesteps": cfg.num_train_timesteps,
             "beta_start": cfg.beta_start,
             "beta_end": cfg.beta_end,
@@ -198,7 +219,14 @@ def main() -> None:
     vae = WFVAEAdapter(vae_cfg)
     vae.build(device=device, dtype=dtype)
 
-    model: nn.Module = build_video_backbone_for_s1(hidden_size=cfg.hidden_size).to(device=device, dtype=dtype)
+    model: nn.Module = build_video_backbone_for_s1(
+        hidden_size=cfg.hidden_size,
+        num_heads=cfg.num_heads,
+        depth=cfg.dit_depth,
+        num_experts=cfg.num_experts,
+        moe_capacity_factor=cfg.moe_capacity_factor,
+        dropout=cfg.dropout,
+    ).to(device=device, dtype=dtype)
     scheduler = NoiseScheduler(
         num_train_timesteps=cfg.num_train_timesteps,
         beta_start=cfg.beta_start,
@@ -267,6 +295,7 @@ def main() -> None:
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
             pred = model(z_t, t)
             loss = F.mse_loss(pred, noise)
+            loss = loss + cfg.moe_aux_loss_coef * model._last_moe_aux
         loss.backward()
         optimizer.step()
         ema.update(model)

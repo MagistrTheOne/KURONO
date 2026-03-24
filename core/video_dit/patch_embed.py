@@ -1,4 +1,4 @@
-"""3D patch embedding for video latents [B, C, T, H, W] -> tokens [B, N, D]."""
+"""3D patch embedding: [B, C, T, H, W] -> [B, N, D] via Conv3d."""
 
 from __future__ import annotations
 
@@ -35,12 +35,8 @@ class VideoPatchEmbed(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, PatchGrid]:
-        """
-        x: [B, C, T, H, W]
-        returns tokens [B, N, D], grid after patching
-        """
         y = self.proj(x)
-        b, d, gt, gh, gw = y.shape
+        _b, _d, gt, gh, gw = y.shape
         tokens = y.flatten(2).transpose(1, 2).contiguous()
         return tokens, PatchGrid(t=gt, h=gh, w=gw)
 
@@ -49,18 +45,14 @@ class VideoPatchEmbed(nn.Module):
         return self.in_channels * pt * ph * pw
 
     def unpatchify(self, patches: torch.Tensor, grid: PatchGrid) -> torch.Tensor:
-        """
-        patches: [B, N, C * pt * ph * pw]
-        returns [B, C, T, H, W]
-        """
-        b, n, pdim = patches.shape
+        b, expected_n, pdim = patches.shape
         pt, ph, pw = self.patch_size
         c = self.in_channels
         expected = c * pt * ph * pw
         if pdim != expected:
-            raise ValueError(f"patch dim {pdim} != in_channels * patch_vol = {expected}")
-        if n != grid.t * grid.h * grid.w:
-            raise ValueError(f"token count {n} != grid product {grid.t * grid.h * grid.w}")
+            raise ValueError(f"patch dim {pdim} != {expected}")
+        if expected_n != grid.t * grid.h * grid.w:
+            raise ValueError("token count mismatch vs grid")
 
         x = patches.view(b, grid.t, grid.h, grid.w, c, pt, ph, pw)
         x = x.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()

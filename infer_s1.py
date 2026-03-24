@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--precision", type=str, default="bf16", choices=["bf16", "fp32"])
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--hidden-size", type=int, default=768)
+    p.add_argument("--dit-depth", type=int, default=12)
+    p.add_argument("--num-heads", type=int, default=12)
+    p.add_argument("--num-experts", type=int, default=8)
+    p.add_argument("--moe-capacity-factor", type=float, default=1.25)
+    p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--checkpoint", type=str, default="")
     p.add_argument("--out", type=str, default="outputs/infer_s1_video.pt")
     p.add_argument("--use-ema", action="store_true")
@@ -57,7 +62,23 @@ def main() -> None:
     vae = WFVAEAdapter(vae_cfg)
     vae.build(device=device, dtype=dtype)
 
-    model = build_video_backbone_for_s1(hidden_size=args.hidden_size).to(device=device, dtype=dtype).eval()
+    ckpt = None
+    c: dict = {}
+    if args.checkpoint:
+        try:
+            ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        except TypeError:
+            ckpt = torch.load(args.checkpoint, map_location=device)
+        c = ckpt.get("config") or {}
+
+    model = build_video_backbone_for_s1(
+        hidden_size=int(c.get("hidden_size", args.hidden_size)),
+        num_heads=int(c.get("num_heads", args.num_heads)),
+        depth=int(c.get("dit_depth", args.dit_depth)),
+        num_experts=int(c.get("num_experts", args.num_experts)),
+        moe_capacity_factor=args.moe_capacity_factor,
+        dropout=args.dropout,
+    ).to(device=device, dtype=dtype).eval()
     ema = EMA(model)
 
     scheduler = NoiseScheduler(
@@ -73,8 +94,7 @@ def main() -> None:
     use_ema = args.use_ema or not args.no_ema
 
     ema_applied = False
-    if args.checkpoint:
-        ckpt = torch.load(args.checkpoint, map_location=device)
+    if ckpt is not None:
         model.load_state_dict(ckpt["model"], strict=True)
         if use_ema and "ema" in ckpt:
             ema.load_state_dict(ckpt["ema"])
