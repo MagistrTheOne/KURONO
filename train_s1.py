@@ -49,6 +49,14 @@ class S1Config:
     ema_decay: float
     checkpoint_every: int
     checkpoint_dir: str
+    data_path: str
+    num_workers: int
+    prefetch_factor: int
+    color_jitter: bool
+    no_augment_hflip: bool
+    filter_manifest: str
+    use_weighted_sampling: bool
+    score_weight_power: float
 
 
 def parse_args() -> S1Config:
@@ -80,6 +88,18 @@ def parse_args() -> S1Config:
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--color-jitter", action="store_true")
     p.add_argument("--no-augment-hflip", action="store_true")
+    p.add_argument(
+        "--filter-manifest",
+        type=str,
+        default="",
+        help="JSON from data/filter_dataset.py; use with --frames matching manifest clip length",
+    )
+    p.add_argument(
+        "--weighted-by-score",
+        action="store_true",
+        help="Sample clips proportional to manifest score^power (requires --filter-manifest)",
+    )
+    p.add_argument("--score-weight-power", type=float, default=1.0)
     a = p.parse_args()
     return S1Config(
         steps=a.steps,
@@ -109,6 +129,9 @@ def parse_args() -> S1Config:
         prefetch_factor=a.prefetch_factor,
         color_jitter=a.color_jitter,
         no_augment_hflip=a.no_augment_hflip,
+        filter_manifest=a.filter_manifest,
+        use_weighted_sampling=a.weighted_by_score,
+        score_weight_power=a.score_weight_power,
     )
 
 
@@ -188,11 +211,29 @@ def main() -> None:
     print(
         f"[KURONO S1] device={device} precision={dtype} steps={cfg.steps} "
         f"shape=[{cfg.batch_size},3,{cfg.frames},{cfg.height},{cfg.width}] mock_vae={cfg.mock_vae} "
-        f"data_path={cfg.data_path or '<random>'}"
+        f"data_path={cfg.data_path or '<n/a>'} filter_manifest={cfg.filter_manifest or '<n/a>'}"
     )
 
     data_iter = None
-    if cfg.data_path:
+    if cfg.filter_manifest:
+        dl = build_dataloader(
+            data_path=None,
+            batch_size=cfg.batch_size,
+            num_workers=cfg.num_workers,
+            frames=cfg.frames,
+            height=cfg.height,
+            width=cfg.width,
+            shuffle=not cfg.use_weighted_sampling,
+            pin_memory=(device.type == "cuda"),
+            prefetch_factor=cfg.prefetch_factor,
+            augment_hflip=not cfg.no_augment_hflip,
+            color_jitter=cfg.color_jitter,
+            manifest_path=cfg.filter_manifest,
+            use_weighted_sampling=cfg.use_weighted_sampling,
+            score_weight_power=cfg.score_weight_power,
+        )
+        data_iter = infinite_dataloader(dl)
+    elif cfg.data_path:
         dl = build_dataloader(
             data_path=cfg.data_path,
             batch_size=cfg.batch_size,
