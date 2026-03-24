@@ -22,6 +22,7 @@ from core.diffusion.noise_scheduler import NoiseScheduler
 from core.training.ema import EMA
 from core.video_dit.backbone import build_video_backbone_for_s1
 from core.video_dit.wfvae_adapter import VAEAdapterConfig, WFVAEAdapter
+from data.video_dataset import build_dataloader, infinite_dataloader
 
 
 @dataclass
@@ -74,6 +75,11 @@ def parse_args() -> S1Config:
     p.add_argument("--ema-decay", type=float, default=0.999)
     p.add_argument("--checkpoint-every", type=int, default=0)
     p.add_argument("--checkpoint-dir", type=str, default="outputs/checkpoints")
+    p.add_argument("--data-path", type=str, default="", help="Directory or video file; empty = random tensors")
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--prefetch-factor", type=int, default=2)
+    p.add_argument("--color-jitter", action="store_true")
+    p.add_argument("--no-augment-hflip", action="store_true")
     a = p.parse_args()
     return S1Config(
         steps=a.steps,
@@ -98,6 +104,11 @@ def parse_args() -> S1Config:
         ema_decay=a.ema_decay,
         checkpoint_every=a.checkpoint_every,
         checkpoint_dir=a.checkpoint_dir,
+        data_path=a.data_path,
+        num_workers=a.num_workers,
+        prefetch_factor=a.prefetch_factor,
+        color_jitter=a.color_jitter,
+        no_augment_hflip=a.no_augment_hflip,
     )
 
 
@@ -176,13 +187,34 @@ def main() -> None:
     amp_enabled = (device.type == "cuda" and dtype == torch.bfloat16)
     print(
         f"[KURONO S1] device={device} precision={dtype} steps={cfg.steps} "
-        f"shape=[{cfg.batch_size},3,{cfg.frames},{cfg.height},{cfg.width}] mock_vae={cfg.mock_vae}"
+        f"shape=[{cfg.batch_size},3,{cfg.frames},{cfg.height},{cfg.width}] mock_vae={cfg.mock_vae} "
+        f"data_path={cfg.data_path or '<random>'}"
     )
+
+    data_iter = None
+    if cfg.data_path:
+        dl = build_dataloader(
+            data_path=cfg.data_path,
+            batch_size=cfg.batch_size,
+            num_workers=cfg.num_workers,
+            frames=cfg.frames,
+            height=cfg.height,
+            width=cfg.width,
+            shuffle=True,
+            pin_memory=(device.type == "cuda"),
+            prefetch_factor=cfg.prefetch_factor,
+            augment_hflip=not cfg.no_augment_hflip,
+            color_jitter=cfg.color_jitter,
+        )
+        data_iter = infinite_dataloader(dl)
 
     pbar = tqdm(range(cfg.steps), desc="train_s1")
     pred = None
     for step in pbar:
-        video = _random_video_batch(cfg, device=device, dtype=dtype)
+        if data_iter is not None:
+            video = next(data_iter).to(device=device, dtype=dtype, non_blocking=True)
+        else:
+            video = _random_video_batch(cfg, device=device, dtype=dtype)
         with torch.no_grad():
             latents = vae.encode(video)
 
