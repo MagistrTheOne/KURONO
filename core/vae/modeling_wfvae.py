@@ -4,8 +4,7 @@ import torch.nn as nn
 import os
 from collections import deque
 import math
-from diffusers.configuration_utils import register_to_config
-
+from .config_mixin import register_to_config
 from .model import ModelRegistry
 from .modeling_output import AutoencoderKLOutput, DecoderOutput, ForwardOutput
 from .modeling_videobase import VideoBaseAE

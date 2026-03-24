@@ -3,15 +3,16 @@ import os
 from typing import Optional, Union
 
 import torch
-from diffusers.configuration_utils import ConfigMixin
-from diffusers.models.modeling_utils import ModelMixin
+from torch import nn
+
+from .config_mixin import ConfigMixin
 
 
-class VideoBaseAE(ModelMixin, ConfigMixin):
+class VideoBaseAE(nn.Module, ConfigMixin):
     config_name = "config.json"
 
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+        nn.Module.__init__(self)
 
     def encode(self, x: torch.Tensor, *args, **kwargs):
         pass
@@ -25,11 +26,14 @@ class VideoBaseAE(ModelMixin, ConfigMixin):
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         **kwargs,
     ):
-        ckpt_files = glob.glob(os.path.join(str(pretrained_model_name_or_path), "*.ckpt"))
+        root = str(pretrained_model_name_or_path)
+        ckpt_files = glob.glob(os.path.join(root, "*.ckpt"))
         if ckpt_files:
             last_ckpt_file = ckpt_files[-1]
-            config_file = os.path.join(str(pretrained_model_name_or_path), cls.config_name)
+            config_file = os.path.join(root, cls.config_name)
             model = cls.from_config(config_file)
             model.init_from_ckpt(last_ckpt_file)
             return model
-        return super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        raise FileNotFoundError(
+            f"No *.ckpt found in {root}. Internal VAE expects a local WF-VAE export (config.json + weights)."
+        )
