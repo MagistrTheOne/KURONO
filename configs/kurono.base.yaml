@@ -1,0 +1,61 @@
+project:
+  name: "NULLXES-KURONO"
+  org: "NULLXES LLC"
+  author: "NULLXES"
+  contact_email: "ceo@nullxes.com"
+
+runtime:
+  device: "cuda"
+  precision_train: "bf16"
+  precision_infer: "bf16"
+  deterministic: true
+  seed: 42
+
+data:
+  video:
+    fps: 24
+    num_frames: 65
+    resolution: [512, 512]
+  audio:
+    sample_rate: 44100
+
+latents:
+  video_vae:
+    provider: "wf-vae"
+    target_channels: 16
+    compression: [4, 8, 8]
+  audio_vae:
+    provider: "dac-like"
+    mode: "continuous"
+
+model:
+  backbone:
+    family: "latent-dit"
+    variant: "s1-dense"
+  moe:
+    enabled: false
+    top_k: 2
+    num_experts: 8
+    load_balance_type: "aux_loss"
+    aux_loss_coeff: 1.0e-2
+    z_loss_coeff: 1.0e-3
+
+train:
+  max_steps: 100000
+  grad_accum: 1
+  batch_size_per_gpu: 1
+  log_every: 20
+  save_every: 1000
+  eval_every: 2000
+
+eval:
+  metrics:
+    - "fvd"
+    - "temporal_consistency"
+    - "clip_score"
+
+product:
+  mode: "raw"
+  watermark: false
+  safety_filter: false
+
