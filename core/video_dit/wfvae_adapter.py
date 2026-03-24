@@ -1,17 +1,9 @@
-"""WF-VAE adapter for KURONO.
-
-Supports two modes:
-- Real mode: use local WF-VAE code + local pretrained path.
-- Mock mode: structure-only latent pipeline without external weights.
-"""
+"""WF-VAE adapter for KURONO (internal core.vae, no external repo on sys.path)."""
 
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -41,13 +33,9 @@ class WFVAEAdapter(nn.Module):
             self.to(device=device, dtype=dtype)
             return
 
-        repo_root = Path(self.cfg.wfvae_repo_path).resolve()
-        if not repo_root.exists():
-            raise FileNotFoundError(f"WF-VAE repo path not found: {repo_root}")
-        if str(repo_root) not in sys.path:
-            sys.path.insert(0, str(repo_root))
+        import core.vae.modeling_wfvae  # noqa: F401 — register "WFVAE"
 
-        from causalvideovae.model import ModelRegistry  # type: ignore
+        from core.vae.model import ModelRegistry
 
         model_cls = ModelRegistry.get_model(self.cfg.model_name)
         if model_cls is None:
@@ -55,7 +43,11 @@ class WFVAEAdapter(nn.Module):
         if not self.cfg.from_pretrained:
             raise ValueError("from_pretrained must be set when mock_mode is False")
 
-        vae = model_cls.from_pretrained(self.cfg.from_pretrained)
+        pretrained = Path(self.cfg.from_pretrained).expanduser()
+        if not pretrained.exists():
+            raise FileNotFoundError(f"Pretrained path not found: {pretrained}")
+
+        vae = model_cls.from_pretrained(str(pretrained))
         if self.cfg.use_tiling and hasattr(vae, "enable_tiling"):
             vae.enable_tiling()
         self._vae = vae.to(device=device, dtype=dtype).eval()
@@ -83,4 +75,3 @@ class WFVAEAdapter(nn.Module):
         if self._vae is None:
             raise RuntimeError("WFVAEAdapter.build() must be called before decode()")
         return self._vae.decode(latents).sample
-
