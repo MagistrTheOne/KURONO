@@ -16,7 +16,7 @@ class VAEAdapterConfig:
     model_name: str = "WFVAE"
     from_pretrained: str = ""
     use_tiling: bool = False
-    mock_mode: bool = True
+    mock_mode: bool = False
     latent_channels: int = 16
 
 

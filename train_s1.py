@@ -22,6 +22,7 @@ from core.diffusion.noise_scheduler import NoiseScheduler
 from core.training.ema import EMA
 from core.video_dit.backbone import build_video_backbone_for_s1
 from core.video_dit.wfvae_adapter import VAEAdapterConfig, WFVAEAdapter
+from core.audio_dit.backbone import AudioDiTConfig, build_audio_dit_for_s1
 from data.video_dataset import build_dataloader, infinite_dataloader
 
 
@@ -63,6 +64,11 @@ class S1Config:
     moe_aux_loss_coef: float
     moe_capacity_factor: float
     dropout: float
+    audio_enabled: bool
+    audio_hidden_size: int
+    audio_depth: int
+    audio_patch_size: int
+    audio_loss_alpha: float
 
 
 def parse_args() -> S1Config:
@@ -89,7 +95,12 @@ def parse_args() -> S1Config:
     p.add_argument("--ema-decay", type=float, default=0.999)
     p.add_argument("--checkpoint-every", type=int, default=0)
     p.add_argument("--checkpoint-dir", type=str, default="outputs/checkpoints")
-    p.add_argument("--data-path", type=str, default="", help="Directory or video file; empty = random tensors")
+    p.add_argument(
+        "--data-path",
+        type=str,
+        default="",
+        help="Directory or video file; required if --filter-manifest is not set (random fallback disabled).",
+    )
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--color-jitter", action="store_true")
@@ -112,6 +123,11 @@ def parse_args() -> S1Config:
     p.add_argument("--moe-aux-loss-coef", type=float, default=0.01)
     p.add_argument("--moe-capacity-factor", type=float, default=1.25)
     p.add_argument("--dropout", type=float, default=0.0)
+    p.add_argument("--audio-enabled", action="store_true", help="Load audio from videos and train audio DiT in parallel")
+    p.add_argument("--audio-loss-alpha", type=float, default=0.5, help="Final loss = video_loss + alpha * audio_loss")
+    p.add_argument("--audio-hidden-size", type=int, default=768)
+    p.add_argument("--audio-depth", type=int, default=12)
+    p.add_argument("--audio-patch-size", type=int, default=4)
     a = p.parse_args()
     return S1Config(
         steps=a.steps,
@@ -123,7 +139,7 @@ def parse_args() -> S1Config:
         lr=a.lr,
         precision=a.precision,
         device=a.device,
-        mock_vae=a.mock_vae or (a.wfvae_pretrained == ""),
+        mock_vae=a.mock_vae,
         wfvae_repo=a.wfvae_repo,
         wfvae_model_name=a.wfvae_model_name,
         wfvae_pretrained=a.wfvae_pretrained,
@@ -150,6 +166,11 @@ def parse_args() -> S1Config:
         moe_aux_loss_coef=a.moe_aux_loss_coef,
         moe_capacity_factor=a.moe_capacity_factor,
         dropout=a.dropout,
+        audio_enabled=a.audio_enabled,
+        audio_hidden_size=a.audio_hidden_size,
+        audio_depth=a.audio_depth,
+        audio_patch_size=a.audio_patch_size,
+        audio_loss_alpha=a.audio_loss_alpha,
     )
 
 
@@ -185,12 +206,21 @@ def _predict_x0_from_noise(
     return (z_t - sigma * pred_noise) / alpha
 
 
-def _save_checkpoint(path: str, model: nn.Module, optimizer: AdamW, ema: EMA, step: int, cfg: S1Config) -> None:
+def _save_checkpoint(
+    path: str,
+    model: nn.Module,
+    optimizer: AdamW,
+    ema: EMA,
+    step: int,
+    cfg: S1Config,
+    audio_model: nn.Module | None = None,
+) -> None:
     ckpt = {
         "step": step,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "ema": ema.state_dict(),
+        "audio_model": audio_model.state_dict() if audio_model is not None else None,
         "config": {
             "hidden_size": cfg.hidden_size,
             "dit_depth": cfg.dit_depth,
@@ -206,6 +236,12 @@ def _save_checkpoint(path: str, model: nn.Module, optimizer: AdamW, ema: EMA, st
 
 def main() -> None:
     cfg = parse_args()
+    if not cfg.mock_vae and not cfg.wfvae_pretrained:
+        raise ValueError("WF-VAE pretrained path is required unless --mock-vae is set.")
+
+    if not cfg.filter_manifest and not cfg.data_path:
+        raise ValueError("Training requires either --data-path or --filter-manifest. Random tensors fallback is disabled.")
+
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     dtype = _dtype_from_precision(cfg.precision)
 
@@ -227,13 +263,29 @@ def main() -> None:
         moe_capacity_factor=cfg.moe_capacity_factor,
         dropout=cfg.dropout,
     ).to(device=device, dtype=dtype)
+
+    audio_model: nn.Module | None = None
+    optimizer_params: list[torch.nn.Parameter] = list(model.parameters())
+    if cfg.audio_enabled:
+        audio_model = build_audio_dit_for_s1(
+            hidden_size=cfg.audio_hidden_size,
+            depth=cfg.audio_depth,
+            num_heads=cfg.num_heads,
+            latent_channels=16,
+            patch_size=cfg.audio_patch_size,
+            dropout=cfg.dropout,
+        ).to(device=device, dtype=dtype)
+        for p in audio_model.audio_vae.parameters():
+            p.requires_grad_(False)
+        optimizer_params = optimizer_params + [p for p in audio_model.parameters() if p.requires_grad]
     scheduler = NoiseScheduler(
         num_train_timesteps=cfg.num_train_timesteps,
         beta_start=cfg.beta_start,
         beta_end=cfg.beta_end,
     ).to(device=device)
     ema = EMA(model, decay=cfg.ema_decay)
-    optimizer = AdamW(model.parameters(), lr=cfg.lr)
+    ema_audio = EMA(audio_model, decay=cfg.ema_decay) if audio_model is not None else None
+    optimizer = AdamW(optimizer_params, lr=cfg.lr)
 
     amp_enabled = (device.type == "cuda" and dtype == torch.bfloat16)
     print(
@@ -259,6 +311,7 @@ def main() -> None:
             manifest_path=cfg.filter_manifest,
             use_weighted_sampling=cfg.use_weighted_sampling,
             score_weight_power=cfg.score_weight_power,
+            audio_enabled=cfg.audio_enabled,
         )
         data_iter = infinite_dataloader(dl)
     elif cfg.data_path:
@@ -274,6 +327,7 @@ def main() -> None:
             prefetch_factor=cfg.prefetch_factor,
             augment_hflip=not cfg.no_augment_hflip,
             color_jitter=cfg.color_jitter,
+            audio_enabled=cfg.audio_enabled,
         )
         data_iter = infinite_dataloader(dl)
 
@@ -281,9 +335,15 @@ def main() -> None:
     pred = None
     for step in pbar:
         if data_iter is not None:
-            video = next(data_iter).to(device=device, dtype=dtype, non_blocking=True)
+            batch = next(data_iter)
+            if cfg.audio_enabled:
+                video, audio_waveform = batch
+            else:
+                video = batch
+                audio_waveform = None
+            video = video.to(device=device, dtype=dtype, non_blocking=True)
         else:
-            video = _random_video_batch(cfg, device=device, dtype=dtype)
+            raise RuntimeError("Random tensors fallback is disabled. Provide --data-path or --filter-manifest.")
         with torch.no_grad():
             latents = vae.encode(video)
 
@@ -294,11 +354,25 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
             pred = model(z_t, t)
-            loss = F.mse_loss(pred, noise)
-            loss = loss + cfg.moe_aux_loss_coef * model._last_moe_aux
+            loss_video = F.mse_loss(pred, noise)
+            loss_video = loss_video + cfg.moe_aux_loss_coef * model._last_moe_aux
+            loss = loss_video
+            if cfg.audio_enabled and audio_model is not None:
+                if audio_waveform is None:
+                    raise RuntimeError("audio_enabled but audio_waveform is missing from dataloader output")
+                audio_latents = audio_model.encode_waveform(
+                    audio_waveform.to(device=device, dtype=dtype, non_blocking=True)
+                )
+                noise_a = torch.randn_like(audio_latents)
+                z_t_a = scheduler.add_noise(latents=audio_latents, noise=noise_a, timesteps=t)
+                pred_a = audio_model(z_t_a, t, cond=None)
+                loss_audio = F.mse_loss(pred_a, noise_a)
+                loss = loss + cfg.audio_loss_alpha * loss_audio
         loss.backward()
         optimizer.step()
         ema.update(model)
+        if ema_audio is not None and audio_model is not None:
+            ema_audio.update(audio_model)
 
         if step % cfg.log_every == 0 or step == cfg.steps - 1:
             pbar.set_postfix({"loss": f"{loss.item():.6f}"})
@@ -318,7 +392,15 @@ def main() -> None:
         if cfg.checkpoint_every > 0 and (step % cfg.checkpoint_every == 0 or step == cfg.steps - 1):
             os.makedirs(cfg.checkpoint_dir, exist_ok=True)
             ckpt_path = os.path.join(cfg.checkpoint_dir, f"s1_step_{step:06d}.pt")
-            _save_checkpoint(ckpt_path, model=model, optimizer=optimizer, ema=ema, step=step, cfg=cfg)
+            _save_checkpoint(
+                ckpt_path,
+                model=model,
+                optimizer=optimizer,
+                ema=ema,
+                step=step,
+                cfg=cfg,
+                audio_model=audio_model,
+            )
 
     # Structural decode check.
     with torch.no_grad():
@@ -329,7 +411,15 @@ def main() -> None:
         ema.restore(model)
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     final_ckpt_path = os.path.join(cfg.checkpoint_dir, "s1_last.pt")
-    _save_checkpoint(final_ckpt_path, model=model, optimizer=optimizer, ema=ema, step=cfg.steps - 1, cfg=cfg)
+    _save_checkpoint(
+        final_ckpt_path,
+        model=model,
+        optimizer=optimizer,
+        ema=ema,
+        step=cfg.steps - 1,
+        cfg=cfg,
+        audio_model=audio_model,
+    )
     print(f"[KURONO S1] done. latent_shape={tuple(pred.shape)} rec_shape={tuple(rec.shape)}")
 
 

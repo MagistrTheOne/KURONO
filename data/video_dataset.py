@@ -24,6 +24,40 @@ if not _HAS_DECORD:
     from torchvision.io import read_video
 
 
+def _resample_waveform(waveform: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
+    if orig_sr == target_sr:
+        return waveform
+    if waveform.ndim != 1:
+        raise ValueError(f"waveform must be [L], got {tuple(waveform.shape)}")
+    l = waveform.shape[0]
+    new_l = int(round(l * target_sr / orig_sr))
+    if new_l <= 0:
+        raise ValueError("invalid resampled length")
+    x = waveform[None, None, :].to(dtype=torch.float32)
+    y = F.interpolate(x, size=new_l, mode="linear", align_corners=False)
+    return y.squeeze(0).squeeze(0)
+
+
+def _decord_avg_fps(vr: "decord.VideoReader") -> float:
+    # decord API varies slightly by version; use best-effort.
+    if hasattr(vr, "get_avg_fps"):
+        return float(vr.get_avg_fps())
+    if hasattr(vr, "get_fps"):
+        return float(vr.get_fps())
+    # Fallback: estimate from first two frames.
+    if len(vr) >= 2 and hasattr(vr, "get_frame_timestamp"):
+        ts0 = vr.get_frame_timestamp(0)
+        ts1 = vr.get_frame_timestamp(1)
+        if isinstance(ts0, tuple):
+            ts0 = ts0[0]
+        if isinstance(ts1, tuple):
+            ts1 = ts1[0]
+        dt = float(ts1) - float(ts0)
+        dt = max(dt, 1e-6)
+        return 1.0 / dt
+    return 30.0
+
+
 def _collect_video_paths(data_path: str | Path) -> list[Path]:
     p = Path(data_path).expanduser().resolve()
     exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -128,6 +162,9 @@ class FilteredClipDataset(Dataset):
         augment_hflip: bool = True,
         color_jitter: bool = False,
         seed: int = 0,
+        audio_enabled: bool = False,
+        audio_sample_rate: int = 16000,
+        assumed_video_fps: float = 30.0,
     ) -> None:
         super().__init__()
         mp = Path(manifest_path).expanduser().resolve()
@@ -147,15 +184,73 @@ class FilteredClipDataset(Dataset):
         self.augment_hflip = augment_hflip
         self.color_jitter = color_jitter
         self._seed = seed
+        self.audio_enabled = audio_enabled
+        self.audio_sample_rate = audio_sample_rate
+        self.assumed_video_fps = assumed_video_fps
+        self.audio_target_len = int(round((clip_frames / assumed_video_fps) * audio_sample_rate))
 
     def __len__(self) -> int:
         return len(self.entries)
 
-    def __getitem__(self, index: int) -> Tensor:
+    def __getitem__(self, index: int) -> Any:
         rng = random.Random((self._seed * 100003 + index * 9187) & 0xFFFFFFFF)
         e = self.entries[index]
         path = Path(e["path"])
         start = int(e["start_frame"])
+        if self.audio_enabled:
+            if _HAS_DECORD:
+                vr = decord.VideoReader(str(path), ctx=decord.cpu(0))
+                fps = _decord_avg_fps(vr)
+            else:
+                from torchvision.io import read_video
+
+                _, _, info = read_video(str(path), start_pts=0, end_pts=1, pts_unit="sec", output_format="TCHW")
+                fps = float(info.get("video_fps", self.assumed_video_fps))
+
+            start_sec = start / fps
+            end_sec = (start + self.clip_frames) / fps
+            from torchvision.io import read_video
+
+            vid, aud, info = read_video(
+                str(path),
+                start_pts=float(start_sec),
+                end_pts=float(end_sec),
+                pts_unit="sec",
+                output_format="TCHW",
+            )
+            if aud.numel() == 0 or info.get("audio_fps", None) is None:
+                raise ValueError(f"audio track missing in {path}")
+
+            t_seg = int(vid.shape[0])
+            if t_seg >= self.clip_frames:
+                frames = vid[: self.clip_frames]
+            else:
+                pick = [min(i, t_seg - 1) for i in range(self.clip_frames)]
+                frames = vid[pick]
+            x = frames.float() / 255.0  # [T,3,H,W]
+            x = x.permute(1, 0, 2, 3).contiguous()  # [3,T,H,W]
+            video = _finalize_video_clip(
+                x,
+                height=self.height,
+                width=self.width,
+                rng=rng,
+                augment_hflip=self.augment_hflip,
+                color_jitter=self.color_jitter,
+            )
+
+            orig_sr = int(info["audio_fps"])
+            wav = aud.float().mean(dim=0)  # [L]
+            wav = _resample_waveform(wav, orig_sr=orig_sr, target_sr=self.audio_sample_rate)
+            wav = wav.contiguous()
+            if wav.shape[0] >= self.audio_target_len:
+                wav = wav[: self.audio_target_len]
+            else:
+                wav = F.pad(wav, (0, self.audio_target_len - wav.shape[0]))
+            mx = wav.abs().max().clamp(min=1e-6)
+            if mx > 1.0:
+                wav = wav / mx
+            return video, wav
+
         x = _load_clip_from_video(path, start, self.clip_frames)
         return _finalize_video_clip(
             x,
@@ -182,6 +277,9 @@ class VideoMP4Dataset(Dataset):
         augment_hflip: bool = True,
         color_jitter: bool = False,
         seed: int = 0,
+        audio_enabled: bool = False,
+        audio_sample_rate: int = 16000,
+        assumed_video_fps: float = 30.0,
     ) -> None:
         super().__init__()
         self.paths = _collect_video_paths(data_path)
@@ -193,30 +291,102 @@ class VideoMP4Dataset(Dataset):
         self.augment_hflip = augment_hflip
         self.color_jitter = color_jitter
         self._seed = seed
+        self.audio_enabled = audio_enabled
+        self.audio_sample_rate = audio_sample_rate
+        self.assumed_video_fps = assumed_video_fps
+        self.audio_target_len = int(round((clip_frames / assumed_video_fps) * audio_sample_rate))
 
     def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, index: int) -> Tensor:
+    def __getitem__(self, index: int) -> Any:
         rng = random.Random((self._seed * 100003 + index * 9187) & 0xFFFFFFFF)
         path = self.paths[index]
+        if not self.audio_enabled:
+            if _HAS_DECORD:
+                vr = decord.VideoReader(str(path), ctx=decord.cpu(0))
+                num_frames = len(vr)
+            else:
+                vid, _, _ = read_video(str(path), pts_unit="sec", output_format="TCHW")
+                num_frames = int(vid.shape[0])
+
+            idxs = _temporal_indices(num_frames, self.clip_frames, rng)
+            if _HAS_DECORD:
+                x = _read_frames_decord(path, idxs)
+            else:
+                n = num_frames
+                pick = [min(max(i, 0), n - 1) for i in idxs]
+                frames = vid[pick].float() / 255.0
+                x = frames.permute(1, 0, 2, 3).contiguous()
+
+            return _finalize_video_clip(
+                x,
+                height=self.height,
+                width=self.width,
+                rng=rng,
+                augment_hflip=self.augment_hflip,
+                color_jitter=self.color_jitter,
+            )
+
+        # Audio-enabled mode: extract aligned segment with torchvision.read_video.
+        # This guarantees real audio loading; if audio is absent we hard-fail.
+        from torchvision.io import read_video
+
         if _HAS_DECORD:
             vr = decord.VideoReader(str(path), ctx=decord.cpu(0))
             num_frames = len(vr)
+            fps = _decord_avg_fps(vr)
         else:
-            vid, _, _ = read_video(str(path), pts_unit="sec", output_format="TCHW")
-            num_frames = int(vid.shape[0])
+            vid_full, aud_full, info_full = read_video(
+                str(path), start_pts=0, end_pts=None, pts_unit="sec", output_format="TCHW"
+            )
+            if aud_full.numel() == 0 or info_full.get("audio_fps", None) is None:
+                raise ValueError(f"audio track missing in {path}")
+            num_frames = int(vid_full.shape[0])
+            fps = float(info_full.get("video_fps", self.assumed_video_fps))
+            aud_full_mono = aud_full.float().mean(dim=0)
+            audio_fps = int(info_full["audio_fps"])
 
-        idxs = _temporal_indices(num_frames, self.clip_frames, rng)
+        idxs = _temporal_indices(num_frames if num_frames > 0 else self.clip_frames, self.clip_frames, rng)
+        start_frame = int(idxs[0])
+        start_sec = start_frame / fps
+        end_sec = (start_frame + self.clip_frames) / fps
+
         if _HAS_DECORD:
-            x = _read_frames_decord(path, idxs)
+            vid, aud, info = read_video(
+                str(path),
+                start_pts=float(start_sec),
+                end_pts=float(end_sec),
+                pts_unit="sec",
+                output_format="TCHW",
+            )
+            if aud.numel() == 0 or info.get("audio_fps", None) is None:
+                raise ValueError(f"audio track missing in {path}")
+            t_seg = int(vid.shape[0])
+            if t_seg >= self.clip_frames:
+                frames = vid[: self.clip_frames]
+            else:
+                pick = [min(i, t_seg - 1) for i in range(self.clip_frames)]
+                frames = vid[pick]
+            orig_sr = int(info["audio_fps"])
+            aud_mono = aud.float().mean(dim=0)
         else:
-            n = num_frames
-            pick = [min(max(i, 0), n - 1) for i in idxs]
-            frames = vid[pick].float() / 255.0
-            x = frames.permute(1, 0, 2, 3).contiguous()
+            pick = [min(max(i, 0), num_frames - 1) for i in idxs]
+            frames = vid_full[pick]
+            aud_mono = aud_full_mono
+            audio_fps = int(audio_fps)  # type: ignore[has-type]
+            orig_sr = audio_fps
 
-        return _finalize_video_clip(
+            # Slice audio by time; vid_full/audio_fps are from the same full decode.
+            start_sample = int(round(start_sec * audio_fps))
+            end_sample = int(round(end_sec * audio_fps))
+            start_sample = max(start_sample, 0)
+            end_sample = min(end_sample, aud_mono.shape[0])
+            aud_mono = aud_mono[start_sample:end_sample]
+
+        x = frames.float() / 255.0  # [T,3,H,W]
+        x = x.permute(1, 0, 2, 3).contiguous()  # [3,T,H,W]
+        video = _finalize_video_clip(
             x,
             height=self.height,
             width=self.width,
@@ -224,6 +394,16 @@ class VideoMP4Dataset(Dataset):
             augment_hflip=self.augment_hflip,
             color_jitter=self.color_jitter,
         )
+
+        wav = _resample_waveform(aud_mono, orig_sr=orig_sr, target_sr=self.audio_sample_rate).contiguous()
+        if wav.shape[0] >= self.audio_target_len:
+            wav = wav[: self.audio_target_len]
+        else:
+            wav = F.pad(wav, (0, self.audio_target_len - wav.shape[0]))
+        mx = wav.abs().max().clamp(min=1e-6)
+        if mx > 1.0:
+            wav = wav / mx
+        return video, wav
 
 
 def build_dataloader(
@@ -244,6 +424,9 @@ def build_dataloader(
     manifest_path: str | Path | None = None,
     use_weighted_sampling: bool = False,
     score_weight_power: float = 1.0,
+    audio_enabled: bool = False,
+    audio_sample_rate: int = 16000,
+    assumed_video_fps: float = 30.0,
 ) -> DataLoader:
     if manifest_path is not None:
         ds: Dataset = FilteredClipDataset(
@@ -254,6 +437,9 @@ def build_dataloader(
             augment_hflip=augment_hflip,
             color_jitter=color_jitter,
             seed=seed,
+            audio_enabled=audio_enabled,
+            audio_sample_rate=audio_sample_rate,
+            assumed_video_fps=assumed_video_fps,
         )
     else:
         if data_path is None:
@@ -266,6 +452,9 @@ def build_dataloader(
             augment_hflip=augment_hflip,
             color_jitter=color_jitter,
             seed=seed,
+            audio_enabled=audio_enabled,
+            audio_sample_rate=audio_sample_rate,
+            assumed_video_fps=assumed_video_fps,
         )
     if persistent_workers is None:
         persistent_workers = num_workers > 0
@@ -292,7 +481,7 @@ def build_dataloader(
     return DataLoader(ds, **kw)
 
 
-def infinite_dataloader(loader: DataLoader) -> Iterator[Tensor]:
+def infinite_dataloader(loader: DataLoader) -> Iterator[Any]:
     while True:
         for batch in loader:
             yield batch

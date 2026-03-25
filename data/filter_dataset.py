@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -13,12 +12,12 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from data.scoring import ClipScores, ScoreGates, ScoreWeights, combined_score
-from data.video_dataset import _HAS_DECORD, _collect_video_paths
+try:
+    from .scoring import ClipScores, ScoreGates, ScoreWeights, combined_score
+    from .video_dataset import _HAS_DECORD, _collect_video_paths
+except ImportError:  # pragma: no cover
+    from data.scoring import ClipScores, ScoreGates, ScoreWeights, combined_score
+    from data.video_dataset import _HAS_DECORD, _collect_video_paths
 
 
 def _resize_score_space(x: torch.Tensor, score_height: int, score_width: int) -> torch.Tensor:

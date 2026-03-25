@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not args.mock_vae and not args.wfvae_pretrained:
+        raise ValueError("WF-VAE pretrained path is required unless --mock-vae is set.")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     dtype = _dtype_from_precision(args.precision)
 
@@ -56,7 +58,7 @@ def main() -> None:
         wfvae_repo_path=args.wfvae_repo,
         model_name=args.wfvae_model_name,
         from_pretrained=args.wfvae_pretrained,
-        mock_mode=args.mock_vae or (args.wfvae_pretrained == ""),
+        mock_mode=args.mock_vae,
         latent_channels=16,
     )
     vae = WFVAEAdapter(vae_cfg)

@@ -15,10 +15,10 @@ class VideoBaseAE(nn.Module, ConfigMixin):
         nn.Module.__init__(self)
 
     def encode(self, x: torch.Tensor, *args, **kwargs):
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.encode() must be implemented.")
 
     def decode(self, encoding: torch.Tensor, *args, **kwargs):
-        pass
+        raise NotImplementedError(f"{self.__class__.__name__}.decode() must be implemented.")
 
     @classmethod
     def from_pretrained(

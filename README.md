@@ -78,5 +78,5 @@ python train_s1.py --steps 50 --batch-size 1 --frames 65 --height 256 --width 25
 
 Note:
 - `--mock-vae` keeps this run fully local and structure-only.
-- Real WF-VAE loading is supported later with local pretrained path (no HF pull in this phase).
+- Without `--mock-vae`, you must provide `--wfvae-pretrained` pointing to a local WF-VAE export (e.g. `config.json` + `*.ckpt`).
 
