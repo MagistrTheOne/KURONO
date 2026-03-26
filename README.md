@@ -24,6 +24,22 @@ Multimodal video + audio generation engine blueprint (DiT-first, MoE-ready).
 - MoE implementation target: MegaBlocks-style dropless MoE.
 - Audio tokenizer target: DAC-style continuous latents.
 
+## Training corpora (planned, Hugging Face)
+
+These datasets are the **intended** sources for KURONO training and curation (licenses and column schemas differ per card — review on Hugging Face before use).
+
+| Corpus | Hugging Face |
+|--------|----------------|
+| Panda-70M | [multimodalart/panda-70m](https://huggingface.co/datasets/multimodalart/panda-70m) |
+| Valley WebVid2M pretrain (703K) | [luoruipu1/Valley-webvid2M-Pretrain-703K](https://huggingface.co/datasets/luoruipu1/Valley-webvid2M-Pretrain-703K) |
+| VideoUFO | [WenhaoWang/VideoUFO](https://huggingface.co/datasets/WenhaoWang/VideoUFO) |
+| OpenVid-1M | [nkp37/OpenVid-1M](https://huggingface.co/datasets/nkp37/OpenVid-1M) |
+| Civitai top SFW (images + metadata) | [wallstoneai/civitai-top-sfw-images-with-metadata](https://huggingface.co/datasets/wallstoneai/civitai-top-sfw-images-with-metadata) |
+
+**Current code path:** `train_s1.py` / `VideoMP4Dataset` expect **local** video files (or a JSON manifest from `data/filter_dataset.py`), not a live `datasets` stream. Staging options: materialize HF splits to disk (e.g. `huggingface-cli download` / your own export) into a tree of `.mp4`/`.webm`/… then point **`--data-path`** at it, or generate a **`--filter-manifest`** from your metadata. A dedicated HF-iterator loader is not in-tree yet.
+
+**Note:** the Civitai entry is **image**-oriented; it does not plug into the current **video** clip loader as-is. Use it for image pipelines, captions/metadata, or later multimodal stages — not for raw `VideoMP4Dataset` without an adapter or conversion step.
+
 ## Repo Layout
 
 ```text
