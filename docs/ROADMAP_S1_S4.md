@@ -8,7 +8,7 @@ Objective:
 Deliverables:
 - WF-VAE adapter for encode/decode.
 - Dense latent DiT training loop.
-- Eval bundle: FVD + reconstruction + consistency probes.
+- Eval: `eval_s1.py` (recon MSE + temporal L1 on data); FVD + CLIP + full consistency bundle still TODO for prod eval.
 
 Exit criteria:
 - Reproducible training run with fixed seeds.

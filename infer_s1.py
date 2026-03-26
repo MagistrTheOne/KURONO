@@ -41,7 +41,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mock-vae", action="store_true")
     p.add_argument("--wfvae-repo", type=str, default="WF-VAE")
     p.add_argument("--wfvae-model-name", type=str, default="WFVAE")
-    p.add_argument("--wfvae-pretrained", type=str, default="")
+    p.add_argument(
+        "--wfvae-pretrained",
+        type=str,
+        default="",
+        help="Local WF-VAE directory (config.json + weights); deploy weights on prod machines only.",
+    )
     p.add_argument("--beta-start", type=float, default=1e-4)
     p.add_argument("--beta-end", type=float, default=2e-2)
     return p.parse_args()

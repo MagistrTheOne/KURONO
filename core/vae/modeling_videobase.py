@@ -1,5 +1,6 @@
 import glob
 import os
+from pathlib import Path
 from typing import Optional, Union
 
 import torch
@@ -26,14 +27,35 @@ class VideoBaseAE(nn.Module, ConfigMixin):
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         **kwargs,
     ):
-        root = str(pretrained_model_name_or_path)
-        ckpt_files = glob.glob(os.path.join(root, "*.ckpt"))
-        if ckpt_files:
-            last_ckpt_file = ckpt_files[-1]
-            config_file = os.path.join(root, cls.config_name)
-            model = cls.from_config(config_file)
-            model.init_from_ckpt(last_ckpt_file)
-            return model
-        raise FileNotFoundError(
-            f"No *.ckpt found in {root}. Internal VAE expects a local WF-VAE export (config.json + weights)."
-        )
+        raw = str(pretrained_model_name_or_path).strip()
+        p = Path(os.path.expanduser(raw))
+        if not p.is_dir():
+            raise FileNotFoundError(
+                f"WF-VAE pretrained must be a local directory: {raw}. "
+                "Copy weights onto the machine (see README: WF-VAE weights)."
+            )
+        root = str(p.resolve())
+
+        config_file = os.path.join(root, cls.config_name)
+        if not os.path.isfile(config_file):
+            raise FileNotFoundError(f"Missing {cls.config_name} under {root}")
+
+        st_hf = os.path.join(root, "diffusion_pytorch_model.safetensors")
+        ckpt_files = sorted(glob.glob(os.path.join(root, "*.ckpt")))
+        st_other = sorted(glob.glob(os.path.join(root, "*.safetensors")))
+
+        if os.path.isfile(st_hf):
+            weights_path = st_hf
+        elif ckpt_files:
+            weights_path = ckpt_files[-1]
+        elif st_other:
+            weights_path = st_other[-1]
+        else:
+            raise FileNotFoundError(
+                f"No weights found in {root}. Expected diffusion_pytorch_model.safetensors, "
+                "*.safetensors, or *.ckpt."
+            )
+
+        model = cls.from_config(config_file)
+        model.init_from_ckpt(weights_path)
+        return model

@@ -46,11 +46,20 @@ KURONO/
 
 ## Next Immediate Work
 
-1. Import `WF-VAE` encode/decode adapter into `core/video_dit`.
-2. Add minimal train config for 256px short clips on H200.
-3. Add evaluation harness: FVD, CLIP-score, temporal consistency probes.
+1. ~~WF-VAE encode/decode via `core/video_dit/wfvae_adapter.py` + `core/vae` (supports `diffusion_pytorch_model.safetensors` or `*.ckpt`).~~
+2. ~~Minimal S1 recipe YAML: `configs/kurono.s1_256.yaml` (reference; `train_s1.py` still uses CLI).~~
+3. ~~Lightweight probes: `eval_s1.py` (reconstruction MSE + temporal L1).~~ Add FVD / CLIP-score with separate deps on prod eval machines.
 
-## S1 Structural Run (No HF Download)
+## WF-VAE weights (production only)
+
+Weights are **not** downloaded by this repo or CI. Ship them only on training/inference hosts.
+
+- **Reference weights (16-ch, matches DiT `latent_channels=16`):** [chestnutlzj/WF-VAE-L-16Chn](https://huggingface.co/chestnutlzj/WF-VAE-L-16Chn) — copy the snapshot directory (e.g. `config.json` + `diffusion_pytorch_model.safetensors`) to the machine, then pass `--wfvae-pretrained /path/to/that/folder`.
+- **Upstream code / paper:** [PKU-YuanGroup/WF-VAE](https://github.com/PKU-YuanGroup/WF-VAE).
+
+Local dev can use `--mock-vae` without any VAE files.
+
+## S1 Structural Run (no weight download in-repo)
 
 Install:
 
@@ -58,25 +67,36 @@ Install:
 pip install -r requirements.txt
 ```
 
-PowerShell:
+PowerShell (requires video data):
 
 ```powershell
+$env:KURONO_DATA_PATH = "D:\path\to\video_or_folder"
 ./run_s1.ps1 -Steps 50 -BatchSize 1 -Frames 65 -Height 256 -Width 256 -Precision bf16 -Device cuda
+# or: ./run_s1.ps1 -DataPath "D:\path\to\video_or_folder" ...
 ```
 
 Bash:
 
 ```bash
+export DATA_PATH=/path/to/video_or_folder   # or KURONO_DATA_PATH
 bash run_s1.sh
 ```
 
 Direct Python:
 
 ```bash
-python train_s1.py --steps 50 --batch-size 1 --frames 65 --height 256 --width 256 --precision bf16 --device cuda --mock-vae
+python train_s1.py --steps 50 --batch-size 1 --frames 65 --height 256 --width 256 --precision bf16 --device cuda --mock-vae --data-path /path/to/video_or_folder
+```
+
+Cheap eval on one or more batches (optional):
+
+```bash
+python eval_s1.py --data-path /path/to/video_or_folder --mock-vae
 ```
 
 Note:
-- `--mock-vae` keeps this run fully local and structure-only.
-- Without `--mock-vae`, you must provide `--wfvae-pretrained` pointing to a local WF-VAE export (e.g. `config.json` + `*.ckpt`).
+
+- Training always needs **`--data-path`** or **`--filter-manifest`** (scripts set `DATA_PATH` / `-DataPath` / `KURONO_DATA_PATH`).
+- `--mock-vae` = structure-only VAE; no weight files.
+- Real VAE: **`--wfvae-pretrained`** = local directory with **`config.json`** plus **`diffusion_pytorch_model.safetensors`** (HF layout) or **`*.ckpt`**.
 

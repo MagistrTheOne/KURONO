@@ -1,0 +1,38 @@
+# S1 reference recipe: 256² short clips (matches train_s1.py CLI defaults for smoke / H200 bring-up).
+# train_s1 does not load this file yet — use as human checklist or future wiring.
+
+project:
+  name: "NULLXES-KURONO"
+  org: "NULLXES LLC"
+
+runtime:
+  device: "cuda"
+  precision_train: "bf16"
+  seed: 42
+
+data:
+  video:
+    fps: 24
+    num_frames: 65
+    resolution: [256, 256]
+
+latents:
+  video_vae:
+    provider: "wf-vae"
+    target_channels: 16
+    compression: [4, 8, 8]
+
+model:
+  backbone:
+    family: "latent-dit"
+    variant: "s1-dense"
+
+train:
+  batch_size_per_gpu: 1
+  grad_accum: 1
+
+eval:
+  metrics:
+    - "temporal_consistency"
+    - "fvd"
+    - "clip_score"

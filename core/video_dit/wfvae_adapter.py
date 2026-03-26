@@ -43,11 +43,13 @@ class WFVAEAdapter(nn.Module):
         if not self.cfg.from_pretrained:
             raise ValueError("from_pretrained must be set when mock_mode is False")
 
-        pretrained = Path(self.cfg.from_pretrained).expanduser()
-        if not pretrained.exists():
-            raise FileNotFoundError(f"Pretrained path not found: {pretrained}")
+        pretrained = Path(self.cfg.from_pretrained.strip()).expanduser()
+        if not pretrained.is_dir():
+            raise FileNotFoundError(
+                f"WF-VAE pretrained must be a local directory with config.json + weights: {pretrained}"
+            )
 
-        vae = model_cls.from_pretrained(str(pretrained))
+        vae = model_cls.from_pretrained(str(pretrained.resolve()))
         if self.cfg.use_tiling and hasattr(vae, "enable_tiling"):
             vae.enable_tiling()
         self._vae = vae.to(device=device, dtype=dtype).eval()

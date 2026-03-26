@@ -85,7 +85,12 @@ def parse_args() -> S1Config:
     p.add_argument("--mock-vae", action="store_true", help="Use mock WF-VAE adapter")
     p.add_argument("--wfvae-repo", type=str, default="WF-VAE")
     p.add_argument("--wfvae-model-name", type=str, default="WFVAE")
-    p.add_argument("--wfvae-pretrained", type=str, default="")
+    p.add_argument(
+        "--wfvae-pretrained",
+        type=str,
+        default="",
+        help="Local directory: config.json + diffusion_pytorch_model.safetensors or *.ckpt (weights on prod only).",
+    )
     p.add_argument("--num-train-timesteps", type=int, default=1000)
     p.add_argument("--beta-start", type=float, default=1e-4)
     p.add_argument("--beta-end", type=float, default=2e-2)

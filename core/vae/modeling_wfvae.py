@@ -635,8 +635,19 @@ class WFVAEModel(VideoBaseAE):
         self.enable_tiling(False)
 
     def init_from_ckpt(self, path, ignore_keys=list()):
-        sd = torch.load(path, map_location="cpu")
-        print("init from " + path)
+        path_str = str(path)
+        if path_str.endswith(".safetensors"):
+            try:
+                from safetensors.torch import load_file
+            except ImportError as e:
+                raise ImportError(
+                    "Install safetensors to load .safetensors WF-VAE weights (e.g. from Hugging Face)."
+                ) from e
+            sd = load_file(path_str)
+            print("init from " + path_str)
+        else:
+            sd = torch.load(path_str, map_location="cpu")
+            print("init from " + path_str)
 
         if (
             "ema_state_dict" in sd
@@ -652,6 +663,14 @@ class WFVAEModel(VideoBaseAE):
                 sd = sd["state_dict"]["gen_model"]
             else:
                 sd = sd["state_dict"]
+        elif isinstance(sd, dict) and sd and all(isinstance(k, str) for k in sd):
+            # Flat state_dict (e.g. Hugging Face diffusion_pytorch_model.safetensors).
+            pass
+        else:
+            raise ValueError(f"Unrecognized checkpoint format: {path_str}")
+
+        if sd and all(k.startswith("vae.") for k in sd):
+            sd = {k[4:]: v for k, v in sd.items()}
 
         keys = list(sd.keys())
 
