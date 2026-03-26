@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torchvision.io import read_video as tv_read_video
 
 try:
     import decord
@@ -19,10 +20,6 @@ try:
     _HAS_DECORD = True
 except Exception:  # noqa: BLE001
     _HAS_DECORD = False
-
-if not _HAS_DECORD:
-    from torchvision.io import read_video
-
 
 def _resample_waveform(waveform: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
     if orig_sr == target_sr:
@@ -143,7 +140,7 @@ def _load_clip_from_video(path: Path, start_frame: int, clip_frames: int) -> Ten
         if batch.ndim != 4:
             raise RuntimeError(f"unexpected decord shape: {tuple(batch.shape)}")
         return batch.permute(3, 0, 1, 2).contiguous()
-    vid, _, _ = read_video(str(path), pts_unit="sec", output_format="TCHW")
+    vid, _, _ = tv_read_video(str(path), pts_unit="sec", output_format="TCHW")
     n = int(vid.shape[0])
     pick = [min(max(i, 0), n - 1) for i in range(start_frame, start_frame + clip_frames)]
     frames = vid[pick].float() / 255.0
@@ -202,16 +199,12 @@ class FilteredClipDataset(Dataset):
                 vr = decord.VideoReader(str(path), ctx=decord.cpu(0))
                 fps = _decord_avg_fps(vr)
             else:
-                from torchvision.io import read_video
-
-                _, _, info = read_video(str(path), start_pts=0, end_pts=1, pts_unit="sec", output_format="TCHW")
+                _, _, info = tv_read_video(str(path), start_pts=0, end_pts=1, pts_unit="sec", output_format="TCHW")
                 fps = float(info.get("video_fps", self.assumed_video_fps))
 
             start_sec = start / fps
             end_sec = (start + self.clip_frames) / fps
-            from torchvision.io import read_video
-
-            vid, aud, info = read_video(
+            vid, aud, info = tv_read_video(
                 str(path),
                 start_pts=float(start_sec),
                 end_pts=float(end_sec),
@@ -307,7 +300,7 @@ class VideoMP4Dataset(Dataset):
                 vr = decord.VideoReader(str(path), ctx=decord.cpu(0))
                 num_frames = len(vr)
             else:
-                vid, _, _ = read_video(str(path), pts_unit="sec", output_format="TCHW")
+                vid, _, _ = tv_read_video(str(path), pts_unit="sec", output_format="TCHW")
                 num_frames = int(vid.shape[0])
 
             idxs = _temporal_indices(num_frames, self.clip_frames, rng)
@@ -330,14 +323,12 @@ class VideoMP4Dataset(Dataset):
 
         # Audio-enabled mode: extract aligned segment with torchvision.read_video.
         # This guarantees real audio loading; if audio is absent we hard-fail.
-        from torchvision.io import read_video
-
         if _HAS_DECORD:
             vr = decord.VideoReader(str(path), ctx=decord.cpu(0))
             num_frames = len(vr)
             fps = _decord_avg_fps(vr)
         else:
-            vid_full, aud_full, info_full = read_video(
+            vid_full, aud_full, info_full = tv_read_video(
                 str(path), start_pts=0, end_pts=None, pts_unit="sec", output_format="TCHW"
             )
             if aud_full.numel() == 0 or info_full.get("audio_fps", None) is None:
@@ -353,7 +344,7 @@ class VideoMP4Dataset(Dataset):
         end_sec = (start_frame + self.clip_frames) / fps
 
         if _HAS_DECORD:
-            vid, aud, info = read_video(
+            vid, aud, info = tv_read_video(
                 str(path),
                 start_pts=float(start_sec),
                 end_pts=float(end_sec),
